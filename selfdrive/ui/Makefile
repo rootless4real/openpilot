@@ -23,17 +23,22 @@ CEREAL_LIBS = -L$(PHONELIBS)/capnp-c/aarch64/lib -l:libcapn.a
 CEREAL_OBJS = ../../cereal/gen/c/log.capnp.o
 
 NANOVG_FLAGS = -I$(PHONELIBS)/nanovg
+JSON_FLAGS = -I$(PHONELIBS)/json/src
 
 OPENGL_LIBS = -lGLESv3
 
 FRAMEBUFFER_LIBS = -lutils -lgui -lEGL
 
 OBJS = ui.o \
-       touch.o \
        ../common/glutil.o \
        ../common/visionipc.o \
        ../common/framebuffer.o \
+       ../common/params.o \
+       ../common/util.o \
+       ../common/touch.o \
+       ../common/swaglog.o \
        $(PHONELIBS)/nanovg/nanovg.o \
+       $(PHONELIBS)/json/src/json.o \
        $(CEREAL_OBJS)
 
 DEPS := $(OBJS:.o=.d)
@@ -47,12 +52,14 @@ ui: $(OBJS)
 	      $(CEREAL_LIBS) \
 	      $(ZMQ_LIBS) \
         -L/system/vendor/lib64 \
+        -lhardware \
         $(OPENGL_LIBS) \
         -lcutils -lm -llog
 
-../common/framebuffer.o: ../common/framebuffer.cc
+%.o: %.cc
 	@echo "[ CXX ] $@"
 	$(CXX) $(CXXFLAGS) -MMD \
+           -Iinclude -I.. -I../.. \
            -I$(PHONELIBS)/android_frameworks_native/include \
            -I$(PHONELIBS)/android_system_core/include \
            -I$(PHONELIBS)/android_hardware_libhardware/include \
@@ -65,6 +72,7 @@ ui: $(OBJS)
           $(NANOVG_FLAGS) \
           $(ZMQ_FLAGS) \
           $(CEREAL_CFLAGS) \
+          $(JSON_FLAGS) \
           -c -o '$@' '$<'
 
 .PHONY: clean

@@ -1,6 +1,9 @@
 import re
+import os
+import struct
 import bitstring
-from binascii import hexlify
+import sys
+import numbers
 from collections import namedtuple
 
 def int_or_float(s):
@@ -16,14 +19,15 @@ DBCSignal = namedtuple(
 
 class dbc(object):
   def __init__(self, fn):
+    self.name, _ = os.path.splitext(os.path.basename(fn))
     with open(fn) as f:
       self.txt = f.read().split("\n")
     self._warned_addresses = set()
 
     # regexps from https://github.com/ebroecker/canmatrix/blob/master/canmatrix/importdbc.py
-    bo_regexp = re.compile("^BO\_ (\w+) (\w+) *: (\w+) (\w+)")
-    sg_regexp = re.compile("^SG\_ (\w+) : (\d+)\|(\d+)@(\d+)([\+|\-]) \(([0-9.+\-eE]+),([0-9.+\-eE]+)\) \[([0-9.+\-eE]+)\|([0-9.+\-eE]+)\] \"(.*)\" (.*)")
-    sgm_regexp = re.compile("^SG\_ (\w+) (\w+) *: (\d+)\|(\d+)@(\d+)([\+|\-]) \(([0-9.+\-eE]+),([0-9.+\-eE]+)\) \[([0-9.+\-eE]+)\|([0-9.+\-eE]+)\] \"(.*)\" (.*)")
+    bo_regexp = re.compile(r"^BO\_ (\w+) (\w+) *: (\w+) (\w+)")
+    sg_regexp = re.compile(r"^SG\_ (\w+) : (\d+)\|(\d+)@(\d+)([\+|\-]) \(([0-9.+\-eE]+),([0-9.+\-eE]+)\) \[([0-9.+\-eE]+)\|([0-9.+\-eE]+)\] \"(.*)\" (.*)")
+    sgm_regexp = re.compile(r"^SG\_ (\w+) (\w+) *: (\d+)\|(\d+)@(\d+)([\+|\-]) \(([0-9.+\-eE]+),([0-9.+\-eE]+)\) \[([0-9.+\-eE]+)\|([0-9.+\-eE]+)\] \"(.*)\" (.*)")
 
     # A dictionary which maps message ids to tuples ((name, size), signals).
     #   name is the ASCII name of the message.
@@ -32,10 +36,8 @@ class dbc(object):
     # signals is a list of DBCSignal in order of increasing start_bit.
     self.msgs = {}
 
-    self.bits = []
-    for i in range(0, 64, 8):
-      for j in range(7, -1, -1):
-        self.bits.append(i+j)
+    # lookup to bit reverse each byte
+    self.bits_index = [(i & ~0b111) + ((-i-1) & 0b111) for i in xrange(64)]
 
     for l in self.txt:
       l = l.strip()
@@ -49,6 +51,8 @@ class dbc(object):
         name = dat.group(2)
         size = int(dat.group(3))
         ids = int(dat.group(1), 0) # could be hex
+        if ids in self.msgs:
+          sys.exit("Duplicate address detected %d %s" % (ids, self.name))
 
         self.msgs[ids] = ((name, size), [])
 
@@ -80,6 +84,16 @@ class dbc(object):
     for msg in self.msgs.viewvalues():
       msg[1].sort(key=lambda x: x.start_bit)
 
+    self.msg_name_to_address = {}
+    for address, m in self.msgs.items():
+      name = m[0][0]
+      self.msg_name_to_address[name] = address
+
+  def lookup_msg_id(self, msg_id):
+    if not isinstance(msg_id, numbers.Number):
+      msg_id = self.msg_name_to_address[msg_id]
+    return msg_id
+
   def encode(self, msg_id, dd):
     """Encode a CAN message using the dbc.
 
@@ -87,6 +101,8 @@ class dbc(object):
         msg_id: The message ID.
         dd: A dictionary mapping signal name to signal data.
     """
+    msg_id = self.lookup_msg_id(msg_id)
+
     # TODO: Stop using bitstring, which is super slow.
     msg_def = self.msgs[msg_id]
     size = msg_def[0][1]
@@ -102,7 +118,7 @@ class dbc(object):
         if s.is_little_endian:
           ss = s.start_bit
         else:
-          ss = self.bits.index(s.start_bit)
+          ss = self.bits_index[s.start_bit]
 
 
         if s.is_signed:
@@ -134,10 +150,7 @@ class dbc(object):
 
         Returns (None, None) if the message could not be decoded.
     """
-    
-    def swap_order(d, wsz=4, gsz=2 ):
-      return "".join(["".join([m[i:i+gsz] for i in range(wsz-gsz,-gsz,-gsz)]) for m in [d[i:i+wsz] for i in range(0,len(d),wsz)]])
-    
+
     if arr is None:
       out = {}
     else:
@@ -146,7 +159,7 @@ class dbc(object):
     msg = self.msgs.get(x[0])
     if msg is None:
       if x[0] not in self._warned_addresses:
-        print("WARNING: Unknown message address {}".format(x[0]))
+        #print("WARNING: Unknown message address {}".format(x[0]))
         self._warned_addresses.add(x[0])
       return None, None
 
@@ -156,6 +169,9 @@ class dbc(object):
 
     blen = 8*len(x[2])
 
+    st = x[2].rjust(8, '\x00')
+    le, be = None, None
+
     for s in msg[1]:
       if arr is not None and s[0] not in arr:
         continue
@@ -163,15 +179,18 @@ class dbc(object):
       # big or little endian?
       #   see http://vi-firmware.openxcplatform.com/en/master/config/bit-numbering.html
       if s[3] is False:
-        ss = self.bits.index(s[1])
-        x2_int = int(hexlify(x[2]), 16)
+        ss = self.bits_index[s[1]]
+        if be is None:
+          be = struct.unpack(">Q", st)[0]
+        x2_int = be
         data_bit_pos = (blen - (ss + s[2]))
       else:
-        x2_int = int(swap_order(hexlify(x[2]), 16, 2), 16)
+        if le is None:
+          le = struct.unpack("<Q", st)[0]
+        x2_int = le
         ss = s[1]
         data_bit_pos = ss
 
-      
       if data_bit_pos < 0:
         continue
       ival = (x2_int >> data_bit_pos) & ((1 << (s[2])) - 1)
@@ -189,4 +208,13 @@ class dbc(object):
       else:
         out[arr.index(s[0])] = ival
     return name, out
-    
+
+  def get_signals(self, msg):
+    msg = self.lookup_msg_id(msg)
+    return [sgs.name for sgs in self.msgs[msg][1]]
+
+if __name__ == "__main__":
+   from opendbc import DBC_PATH
+
+   dbc_test = dbc(os.path.join(DBC_PATH, sys.argv[1]))
+   print dbc_test.get_signals(0xe4)

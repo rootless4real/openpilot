@@ -1,1 +1,1 @@
-const char *openpilot_version = "0.2.9";
+#define COMMA_VERSION "0.4.7.2-release"
